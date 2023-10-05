@@ -1,125 +1,48 @@
-import pdfplumber
-import re
-import numpy as np
-import pandas as pd
-import jieba
-import ltp
+import os
+import spacy
+import psycopg2
+import jieba.analyse
+from ltp import LTP, StnSplit
+from PyPDF2 import PdfReader
 
+def extract_text_from_pdf(pdf_path):
+    pdf = PdfReader(pdf_path)
+    text = ''
+    for page in pdf.pages:
+        text += page.extract_text()
+    return text
 
-def extract_core_content(pdf_path):
-    """
-    提取判决书核心内容
+def extract(text):
+    # 使用 Spacy 进行句法分析
+    nlp = spacy.load("zh_core_web_sm")
+    doc = nlp(text)
+    sentences = []
+    for sent in doc.sents:
+        sentences.append(sent.text)
 
-    Args:
-        pdf_path: 判决书 PDF 文件路径
+    # 使用 ltp 进行句子分割
+    sents_list = StnSplit().split(text)
 
-    Returns:
-        提取的核心内容
-    """
+    # 使用 jieba 进行关键词提取
+    keywords = jieba.analyse.extract_tags(' '.join(sents_list), topK=20)
 
-    # 读取 PDF 文档
-    with pdfplumber.open(pdf_path) as pdf:
-        pages = pdf.pages
+    # 将提取的关键信息写入数据库
+    conn = psycopg2.connect(host="localhost", port=24052, user="postgres", password="hurao415", dbname="legal_corpus")
+    cursor = conn.cursor()
 
-    # 提取事件
-    events = []
-    for page in pages:
-        for text in page.extract_text().split("\n"):
-            # 使用正则表达式匹配事件
-            matches = re.findall(r"(.*)[\s]+(发生|发生了|发生于)(.*)", text)
-            if matches:
-                events.append(matches[0])
+    cursor.execute("SELECT to_regclass('public.info')")
+    if cursor.fetchone()[0] is None:
+        cursor.execute("CREATE TABLE info (id SERIAL PRIMARY KEY, case_type VARCHAR(255), case_no VARCHAR(255), court VARCHAR(255), judge VARCHAR(255), date DATE, plaintiff VARCHAR(255), defendant VARCHAR(255), third_party VARCHAR(255), fact VARCHAR(255), law VARCHAR(255), result VARCHAR(255))")
 
-    # 使用最大正向匹配法提取事件要素
-    events = [
-        [
-            re.findall(r"[\s]+(.*)[\s]+", event)[0],
-            re.findall(r"[\s]+(.*)[\s]+", event)[1],
-            re.findall(r"[\s]+(.*)[\s]+", event)[2],
-        ]
-        for event in events
-    ]
-
-    # 使用分词工具提取事件要素
-    events = [
-        [
-            ltp.segmentor.segment(event[0]),
-            ltp.segmentor.segment(event[1]),
-            ltp.segmentor.segment(event[2]),
-        ]
-        for event in events
-    ]
-
-    # 使用命名实体识别工具提取事件要素
-    events = [
-        [
-            ltp.ner.ner(event[0]),
-            ltp.ner.ner(event[1]),
-            ltp.ner.ner(event[2]),
-        ]
-        for event in events
-    ]
-
-    # 将事件要素拼接成字符串
-    events = [
-        "{0[0]} {0[1]} {0[2]}".format(event)
-        for event in events
-    ]
-
-    return events
-
-
-def write_to_database(events, database_path):
-    """
-    将提取的核心内容写入数据库
-
-    Args:
-        events: 提取的核心内容
-        database_path: 数据库路径
-    """
-
-    # 连接数据库
-    connection = connect_to_database(database_path)
-    cursor = connection.cursor()
-
-    # 查询判决号是否存在
-    cursor.execute(
-        """
-        SELECT COUNT(*) FROM events WHERE number = %s;
-        """,
-        (events[0],),
-    )
-    count = cursor.fetchone()[0]
-
-    # 如果判决号存在，则不重复写入
-    if count > 0:
-        return
-
-    # 写入数据
-    cursor.execute(
-        """
-        INSERT INTO events (number, content) VALUES (%s, %s);
-        """,
-        (events[0], events[1]),
-    )
-
-    # 提交事务
-    connection.commit()
-
-    # 关闭连接
+    for keyword in keywords:
+        cursor.execute("INSERT INTO info (case_type) VALUES (%s)", (keyword,))
+    conn.commit()
     cursor.close()
-    connection.close()
+    conn.close()
 
-
-def main():
-    pdf_path = "判决书.pdf"
-    events = extract_core_content(pdf_path)
-    print(events)
-
-    # 将提取的核心内容写入数据库
-    database_path = "database.db"
-    write_to_database(events, database_path)
-
+    return sentences, keywords
 
 if __name__ == "__main__":
-    main()
+    pdf_path = "C:\判决书\赵小松、向利上诉李立华、唐大轩民间借贷纠纷二审判决书.pdf"
+    text = extract_text_from_pdf(pdf_path)
+    extract(text)
